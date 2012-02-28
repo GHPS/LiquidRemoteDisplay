@@ -1,6 +1,18 @@
-/*
- arduino-matrixorbital.ino
- A software emulator for Matrix Orbital character display commands on Arduino.
+/*  Matrixino -
+A software emulator for Matrix Orbital LC display commands on Arduino.
+
+ V2.0 28/02/2012 by GHPS
+   - adapted to new, unified LiquidCrystal library
+      -> http://bitbucket.org/fmalpartida/new-liquidcrystal
+      -> supports all kinds of connection (parallel, I2C, SR)
+         and should support even multiple displays 
+  - fixed startup and shutdown commands 
+    -> all commands implemented now
+  - supports contrast and brightness with parallel displays
+  - supports the standard block character
+  - fixed character redefinition
+    -> all "higher" LCDSmartie plugins now work (BigNum, Winamp)
+   - fixed GPO routines -> no more dumps to shutdown screen
  
  V1.5 28/12/2011
  Added fixes by yosoyzenitram, prettified code a little and added all Matrix Obrital commands for display model LK204-25.
@@ -17,176 +29,286 @@
  Matrix Orbital LK204-25 manual (for command reference):
  http://www.matrixorbital.ca/manuals/LK_Series/LK204-25/LVK204-25%20%28Rev1.3%29.pdf
  
- The circuit (make sure to power the LCD):
- * LCD RS pin to digital pin 12
- * LCD E pin to digital pin 11
- * LCD D4 pin to digital pin 5
- * LCD D5 pin to digital pin 4
- * LCD D6 pin to digital pin 3
- * LCD D7 pin to digital pin 2
- * LCD Ve pin (contrast) to digital pin 6
- 
- */
+*/
+
+#include <Wire.h> 
 
 #include <LiquidCrystal.h>
+LiquidCrystal lcd_1(4, 7, 8, 9, 10, 11, 12);
 
-// You can define your own pins here.
-#define RS 12
-#define E  11
-#define D4 5
-#define D5 4
-#define D6 3
-#define D7 2
-#define BR 6
+//#include <SoftwareSerial.h>
+//SoftwareSerial Serialport(0, 1);
+#define Serialport Serial
 
-#define VERSION 1
+#define version_number 1
+#define          backlight_pin     5
+#define          contrast_pin      6
+#define          expander_address B0100000
+#define	         lcd_1_maxX       20
+#define		 lcd_1_maxY       4
 
-#define GPO1 8 // Not yet implemented. (pg. 18 of the manual)
+byte x = 0;
+byte y = 0;
+byte firstByte;
+byte temp;
+byte id;
+byte GPO       = 0;
+byte currentBrightness;
+byte currentContrast;
+boolean sendKey      = true;
+boolean autoTransmit =false;
+unsigned long  keyTimer;
 
-LiquidCrystal lcd(RS, E, D4, D5, D6, D7);
+uint8_t newCharacter[8]  = {0x0,0x1b,0xe,0x4,0xe,0x1b,0x0}; // array for custom characters -> by default a cross to see any errors
+
+uint8_t fullBlock[8] =
+{
+	B00000,
+	B11111,
+	B11111,
+	B11111,
+	B11111,
+	B11111,
+	B00000,
+	B00000
+};
 
 void setup() {
-  Serial.begin(19200); // Default baudrate.
-  lcd.begin(16, 2); // Change this for other screen sizes.
-
-  analogWrite(BR, 0); // Set maximum brightness.
-
-  lcd.print("Arduino");
-  lcd.setCursor(1, 1);
-  lcd.print("Matrix Orbital!");
+  Wire.begin(); 
+  keyTimer=millis();
+  lcd_1.begin(lcd_1_maxX,lcd_1_maxY);
+  lcd_1.clear();
+  lcd_1.createChar(1,fullBlock);
+  pinMode(backlight_pin, OUTPUT);
+  pinMode(contrast_pin, OUTPUT);
+  currentBrightness=255;
+  currentContrast=205;
+  analogWrite(backlight_pin, currentBrightness);
+  analogWrite(contrast_pin, 255-currentContrast);
+  generalPurposeOut(1,0); // reset all lines since GPO=0
+  Serialport.begin(19200);
 }
 
-void loop() {
-  byte rxbyte = serial_getch(); // Command
-  byte temp; // Parameter
-
-  if (rxbyte == 254) {
-    switch (serial_getch()) {
-    case 71: // Set cursor position (2 parameters, column, row)
-      lcd.setCursor(serial_getch() - 1, serial_getch() - 1);
-      break;
-    case 72: // Cursor home (doesn't clear the screen!)
-      //lcd.home();
-      lcd.setCursor(0,0);
-      break;
-    case 74: // Underline cursor on
-      lcd.cursor();
-      break;
-    case 75: // Underline cursor off
-      lcd.noCursor();
-      break;
-    case 83: // Block cursor on
-      lcd.blink();
-      break;
-    case 84: // Block cursor off
-      lcd.noBlink();
-      break;
-    case 76: // Move cursor left
-      lcd.command(16);
-      break;
-    case 77: // Move cursor right
-      lcd.command(20);
-      break;
-    case 78: // Define custom character (2 parameters, id, data)
-      lcd.command(64 + (serial_getch() * 8));
-      for (temp = 7; temp != 0; temp--) {
-        lcd.print(serial_getch());
-      }
-      break;
-      //case 35: // Read serial number
-      //case 36: // Read version number
-    case 54: // Read version number
-      Serial.print(VERSION);
-      break;
-    case 55: // Read module type
-      Serial.print(9); // 9 for LK204-25
-      break;
-    case 80: // Set contrast (1 parameter, contrast)
-      analogWrite(BR, 0xFF-serial_getch());
-      break;
-    case 81: // Auto scroll on
-      lcd.autoscroll();
-      break;
-    case 82: // Auto scroll off
-      lcd.noAutoscroll();
-      break;
-    case 86: // General Purpose Output off (1 parameter, number)
-      //temp = serial_getch();
-      //if (temp == 1) {
-      //  digitalWrite(GPO1, LOW);
-      //}
-      break;
-    case 87: // General Purpose Output on (1 parameter, number)
-      //temp = serial_getch();
-      //if (temp == 0) {
-      //  digitalWrite(GPO1, HIGH);
-      //}
-      break;
-    case 88: // Clear screen
-      lcd.clear();
-      break;
-    case 35: // Place large number
-    case 38: // Poll key presses
-    case 51: // Change I2C slave address (1 parameter, address)
-    case 57: // Change baud rate (1 parameter, baud rate)
-    case 59: // Exit flow-control mode
-    case 61: // Place vertical bar (2 parameters, column, length)
-    case 64: // Change the startup screen
-    case 65: // Auto transmit keypresses on
-    case 67: // Auto line wrap on
-    case 68: // Auto line wrap off
-    case 66: // Backlight on (1 parameter, minutes)
-    case 69: // Clear key buffer
-    case 70: // Backlight off
-    case 79: // Auto transmit keypress off
-    case 85: // Set debounce time (1 paramater, time)
-    case 96: // Auto repeat mode off
-    case 152: // Set and save brightness (1 parameter, brightness)
-    case 153: // Set backlight brightness (1 parameter, brightness)
-    case 104: // Initialize horizontal bar
-    case 109: // Initialize medium number
-    case 110: // Initialize lange numbers
-    case 111: // Place medium numbers
-    case 115: // Initialize narrow vertical bar
-    case 118: // Initialize wide vertical bar
-    case 124: // Place horizontal bar graph (4 parameters, column, row, direction, length)
-    case 126: // Set auto repeat mode (1 parameter, mode)
-    case 145: // Set and save contrast (1 parameter, contrast)
-    case 160: // Transmission protocol select (1 parameter, protocol)
-    case 192: // Load custom characters (1 parameter, bank)
-    case 164: // Setting a non-standart baudrate (1 parameter, speed)
-    case 193: // Save custom character (3 parameters, bank, id, data)
-    case 194: // Save startup screen custom characters (2 parameters, id, data)
-    case 195: // Set startup GPO state (2 parameters, number, state)
-    case 200: // Dallas 1-Wire
-      switch (serial_getch()) {
-      case 1: // Dallas 1-Wire transaction (6 parameters, flags, send, bits, receive, bits, data)
-      case 2: // Search for a 1-Wire device
-      default:
-        break;
-      }
-      break;
-    case 213: // Assign keypad codes
-    default:
-      /* All other commands are ignored 
-       and parameter byte is discarded. */
-      temp = serial_getch();
-      break;
-    }
-    return; // Stop and start again.
-  }
-
-  // Otherwise its a plain char so we print it to the LCD.
-  lcd.write(rxbyte);
+void updateKeys()
+{ 		
 }
 
-/*
- * Waits for a byte to be available, reads and returns it.
- */
-byte serial_getch() {
-  while (Serial.available() == 0);
-
-  return Serial.read();
+byte serial_getch(){
+  while (Serialport.available()==0) updateKeys();
+  return (Serialport.read());
 }
 
+void generalPurposeOut(byte address, byte mode)
+{
+	Wire.beginTransmission(expander_address);
+	bitWrite(GPO,address,mode);
+	Wire.write(GPO xor B11111111);
+	Wire.endTransmission();  
+}
 
+void executeCommand(byte commandCode)
+{
+	switch (commandCode)
+	{
+	case 0x23: // HEX 0x23 =DEC 35 Place large digit
+		x=serial_getch()-1;   //column
+		y=serial_getch()-1;   //digit
+		break;
+	case 0x36: // HEX 0x36 =DEC 54 Read version number
+		Serialport.write(version_number);
+		break;   
+	case 0x37: // HEX 0x37 =DEC 55 Read module type
+		Serialport.print(0x09, HEX); // Matrix Display LK204-25 (20x4 LCD with keypad)
+		break;
+/*	case 59: // HEX 0x =DEC 59 Exit flow-control mode
+		break;*/
+	case 0x3d: // HEX 0x3d =DEC 61 Draw vertical bar
+		x=serial_getch()-1;   //column
+		y=serial_getch()-1;   //height
+		break;
+	case 0x41: // HEX 0x41 =DEC 65 Auto transmit keypresses ON
+                autoTransmit=true;
+		break;
+	case 0x42: // HEX 0x42 =DEC 66 Backlight ON
+		temp=serial_getch(); // get the time in minutes to stay on -> discarded
+		analogWrite(backlight_pin, currentBrightness);
+		break;
+	case 0x43: // HEX 0x43 =DEC 67 Auto line-wrap ON
+		break;
+	case 0x44: // HEX 0x44 =DEC 68 Auto line-wrap OFF    
+		break;
+	case 0x45: // HEX 0x45 =DEC 69 Clear key buffer
+		break;
+	case 0x46: // HEX 0x46 =DEC 70 Backlight OFF
+		analogWrite(backlight_pin, 0); // currentBrightness unchanged
+		break;
+	case 0x47:  //HEX 0x47 =DEC 71 Set cursor position
+		x=serial_getch()-1;   //get column byte
+		y=serial_getch()-1;   //get row byte
+                lcd_1.setCursor(x,y);
+		break;
+	case 0x48:  // HEX 0x48 =DEC 72 Cursor home (reset display position)
+		lcd_1.home(); 
+		break;
+	case 0x4a:  // HEX 0x4a =DEC 74 Underline cursor ON
+		lcd_1.cursor();
+		break;
+	case 0x4b:  // HEX 0x4b =DEC 75 Underline cursor OFF
+		lcd_1.noCursor();
+		break;
+	case 0x4c:  // HEX 0x4c =DEC 76 Move cursor left
+		lcd_1.moveCursorLeft();
+		x--;
+		break;
+	case 0x4d:  // HEX 0x4d =DEC 77 Move cursor right
+		lcd_1.moveCursorRight();
+		x++;
+		break;
+	case 0x4e:  // HEX 0x4E =DEC 78 Define custom character
+		id=serial_getch();
+		for (temp=0; temp<8; temp++) newCharacter[temp]=serial_getch(); // Get patterns byte from top to bottom
+		lcd_1.createChar(id,newCharacter);
+		break;
+	case 0x4f: // HEX 0x4f =DEC 79 Auto transmit keypresses OFF
+                autoTransmit=false;
+		break;
+	case 0x50: //HEX 0x50 =DEC 80 Set contrast
+		currentContrast=serial_getch();
+		analogWrite(contrast_pin, 255-currentContrast);
+		break;
+	case 0x51: // HEX 0x51 =DEC 81 Auto scroll ON
+		lcd_1.autoscroll();
+		break;
+	case 0x52: // HEX 0x52 =DEC 82 Auto scroll OFF
+		lcd_1.noAutoscroll();
+		break;
+	case 0x53: // HEX 0x53 =DEC 83 Block cursor ON
+		lcd_1.blink();
+		break;
+	case 0x54:  // HEX 0x54 =DEC 84 Block cursor OFF
+		lcd_1.noBlink();
+		break;
+	case 0x56:  //HEX 0x56 =DEC 86 General purpose output OFF
+		id=serial_getch();
+		generalPurposeOut(id-1,0);   // The first bit is number 0   
+		break;
+	case 0x57:  // HEX 0x57 =DEC 87 General purpose output ON
+		id=serial_getch();
+		generalPurposeOut(id-1,1);   // The first bit is number 0
+		break;
+	case 0x58:  // HEX 0x58 =DEC 88 Clear display and move cursor home
+		lcd_1.clear();
+		break;
+	case 0x60: //HEX 0x96 =DEC Auto-repeat mode OFF (keypad)      
+		break;
+	case 0x68: // HEX 0x69 =DEC 104 Init horiz bar graph
+		break;
+	case 0x6e: // HEX 0x6e =DEC 110 Large digits      
+		break;
+	case 109: //HEX 0x =DEC   Init med size digits
+		break;
+	case 0x73: // HEX 0x =DEC 115 Init narrow vert bar graph
+		break;
+	case 0x76: // HEX 0x76 =DEC 118 Init wide vert bar graph
+		break;
+	case 0x7c: // HEX 0x7c =DEC 124 Draw horizontal bar graph
+		x=serial_getch()-1;   //column
+		y=serial_getch()-1;   //row
+		x=serial_getch()-1;   //dir
+		y=serial_getch()-1;   //lenght
+		break;
+	case 0x98: //HEX 0x =DEC  Set and remember backlight
+		currentBrightness=serial_getch();
+		analogWrite(backlight_pin, currentBrightness);
+		break;
+	case 0x99: //HEX 0x99 =DEC 153 Set backlight brightness
+		currentBrightness=serial_getch();
+		analogWrite(backlight_pin, currentBrightness);
+		break;
+	default:
+		//all other commands ignored and parameter byte discarded
+		temp=serial_getch();  //dump the command code
+		break;
+	}
+	return;
+}
+
+byte characterSubstitution(byte character)
+{
+  byte returnCharacter=character;
+  if (character>=0x80) 
+      switch (character)
+	{   
+	case 0x80: returnCharacter=0xFF; break; // Full block
+	case 0xA3: returnCharacter=0xED; break; // British pound-sterling
+        case 0xB5: returnCharacter=0xE4; break; // Greek "mu"
+	case 0xC0: // A-like characters
+	case 0xC1:
+	case 0xC2:
+	case 0xC3:
+	case 0xC4:
+	case 0xC5: returnCharacter=0x41; break;
+	case 0xC8: // E-like characters
+	case 0xC9:
+	case 0xCA:
+	case 0xCB: returnCharacter=0x45; break;
+	case 0xCC: // I-like characters
+	case 0xCD:
+	case 0xCE:
+	case 0xCF: returnCharacter=0x49; break;
+	case 0xD1: returnCharacter=0x43; break; // Spanish N+~ (tilde) -> plain "N"
+	case 0xD2: // O-like characters
+	case 0xD3:
+	case 0xD4:
+	case 0xD5:
+	case 0xD6:
+	case 0xD8: returnCharacter=0x4F; break;
+	case 0xD9: // U-like characters
+	case 0xDA:
+	case 0xDB:
+	case 0xDC: returnCharacter=0x55; break;
+	case 0xDD: returnCharacter=0x59; break; //"Y" acute -> "Y"
+	case 0xDF: returnCharacter=0xE2; break; // German sharp-s -> beta sign "ß" 
+        case 0xE0: // a-like characters
+	case 0xE1:
+	case 0xE2:
+	case 0xE3:
+        case 0xE4: returnCharacter=0xE1; break; // German ä(a+") (Umlaut)
+	case 0xE5: returnCharacter=0x61; break;
+	case 0xE7: returnCharacter=0x63; break; //"c" cedilla -> "c"
+	case 0xE8: // e-like characters
+	case 0xE9:
+	case 0xEA:
+	case 0xEB: returnCharacter=0x65; break;
+	case 0xEC: // i-like characters
+	case 0xED:
+	case 0xEE:
+	case 0xEF: returnCharacter=0x69; break;
+	case 0xF1: returnCharacter=0xEE; break; // Spanish n+~ (tilde)
+	case 0xF2: // o-like characters
+	case 0xF3:
+	case 0xF4:
+	case 0xF5:
+	case 0xF6: returnCharacter=0xEF; break; // German ö(o+") (Umlaut)
+	case 0xF8: returnCharacter=0x6F; break;
+	case 0xF7: returnCharacter=0xFD; break; // Division symbol
+	case 0xF9: // u-like characters
+	case 0xFA:
+	case 0xFB: returnCharacter=0x75; break;
+	case 0xFC: returnCharacter=0xF5; break; // German ü(u+") (Umlaut)
+	}
+   return returnCharacter;
+}
+
+void printCharacter(byte character)
+{
+  lcd_1.write(characterSubstitution(character));
+  x++;
+}
+
+void loop()
+{ 
+  firstByte=serial_getch();
+  if (firstByte!=0xFE) printCharacter(firstByte);
+    else executeCommand(serial_getch());                 // Matrix Orbital displays use 'FE' as prefix for commands
+}

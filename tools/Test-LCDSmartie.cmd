@@ -1,0 +1,1 @@
+LCDSmartie.exe -config test-config.ini
